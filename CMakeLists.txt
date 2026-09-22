@@ -9,7 +9,7 @@ add_executable(
     myplace
     myplace_main.cpp
     #${PROJECT_SOURCE_DIR}/MyPlace/myplace.cpp
-    #${PROJECT_SOURCE_DIR}/PlaceData/placedata.cpp
+    ${PROJECT_SOURCE_DIR}/PlaceData/placedata.cpp
 )
 include_directories (
     ${PROJECT_SOURCE_DIR}/MyPlace

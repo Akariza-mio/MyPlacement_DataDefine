@@ -1,10 +1,8 @@
 #pragma once
-#ifndef PLACEDATA_H
-#define PLACEDATA_H
-#include "Common/objects.h"
+#include "objects.h"
 #include <map>
 #include <vector>
-
+#include <string>
 
 class PlaceData{
 public:
@@ -13,13 +11,13 @@ public:
     int netCount;
     int pinCount;
 
-    vector<Module *> Nodes; 
-    vector<Module *> Terminals;
-    vector<Pin *> Pins;
-    vector<Net *> Nets;
+    vector<Module*> Nodes; 
+    vector<Module*> Terminals;
+    vector<Pin*> Pins;
+    vector<Net*> Nets;
     vector<SiteRow> SiteRows;
 
-    map<string, Module *> moduleMap; 
+    map<string, Module*> moduleMap; 
 
     void readBookShelf(const string& dir,const string& benchmarkname);
     void readNodes(const string& filename);
@@ -27,4 +25,3 @@ public:
     void readScl(const string& filename);
     void readNets(const string& filename);
 };
-#endif
