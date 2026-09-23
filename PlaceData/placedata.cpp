@@ -115,6 +115,60 @@ void PlaceData::readScl(const string& filename){
     }
     ifs.close();
 }
+void PlaceData::readNets(const string& filename){
+    ifstream ifs(filename);
+    if(!ifs.is_open()){
+        cerr << "failed to open file: " << filename << endl;
+        return;
+    }
+    string line;
+    Net* nt = nullptr;
+    int pins_to_read = 0;
+    while(getline(ifs,line)){
+        if(line.empty() || line[0] == '#' || line[0] == 'U'){
+            continue;
+        }
+        stringstream ss(line);
+        string token;
+        string colon;
+        ss >> token;
+        if(token == "NumNets"){
+            ss >> colon >> netCount;
+        }else if(token == "NumPins"){
+            ss >> colon >> pinCount;
+        }else if(token == "NetDegree"){
+            string net_name;
+            int degree;
+            ss >> colon >> pins_to_read >> net_name;
+            nt = new Net();
+            nt->idx = Nets.size();
+            Nets.push_back(nt);
+        }else{
+            if(pins_to_read > 0){
+                string node_name = token;
+                string direction;
+                float x,y;
+                ss >> direction >> colon >> x >> y;
+                auto it = moduleMap.find(node_name);
+                if(it != moduleMap.end()){
+                    Module* tp_mod = it->second;
+                    Pin* p = new Pin();
+                    p->idx = Pins.size();
+                    p->module = tp_mod;
+                    p->net = nt;
+                    p->offset.x = x;
+                    p->offset.y = y;
+                    Pins.push_back(p);
+                    nt->netPins.push_back(p);
+                    tp_mod->modulePins.push_back(p);
+                    tp_mod->nets.push_back(nt);
+                }
+            }
+            --pins_to_read;
+        }
+    }
+    ifs.close();
+}
 void PlaceData::readBookShelf(const string& dir, const string& benchmarkname){
     //dir = ./test_data/adaptec1    benchmark = adaptec1
     string file_path_prefix = dir + "/" + benchmarkname;
@@ -123,7 +177,9 @@ void PlaceData::readBookShelf(const string& dir, const string& benchmarkname){
     readNodes(file_path_prefix + ".nodes");
     readPl(file_path_prefix + ".pl");
     readScl(file_path_prefix + ".scl");
-    //readNets(file_path_prefix + ".nets");
+    readNets(file_path_prefix + ".nets");
     cout << "[数据解析完成] 总普通单元数: " << Nodes.size() << ", 宏单元/IO数: " << Terminals.size() << endl;
     cout << "[数据解析完成] 总标准单元拜访行数: " << SiteRows.size() << endl;
+    cout << "成功读取连线数: " << Nets.size() << " / " << netCount << endl;
+    cout << "成功读取引脚数: " << Pins.size() << " / " << pinCount << endl;
 }
