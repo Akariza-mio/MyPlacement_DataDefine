@@ -3,6 +3,7 @@
 
 #include "placedata.h"
 #include "common.h"
+#include <cstddef>
 
 // CoreRegion：整个布局区域的外包矩形；当前随机布局会使用它。
 // 坐标单位与 Module::center、Module::width、Module::height 一致。
@@ -46,7 +47,7 @@ public:
 };
 
 // MyPlacer：布局算法的执行者，通过 db 访问单元并更新位置。
-// 当前提供随机布局 randomPlace 和结果导出 writePl。
+// 当前提供随机布局、聚类驱动布局和结果导出。
 // 网格、面积统计和梯度字段是后续算法的预留数据。
 class MyPlacer
 {
@@ -68,6 +69,13 @@ public:
     // 区域无效、单元尺寸无效或放不下时抛出 std::invalid_argument 异常。
     // 两个列表应保存各单元的唯一指针，坐标修改前会完成输入检查。
     void randomPlace(const CoreRegion& region, unsigned int seed = 42);
+
+    // 先按接线分组，再安排组内位置。seed 只影响位置。
+    // 只写回可移动单元的 center，固定单元保持原位，初始位置允许重叠。
+    // 如提供 groupIds，成功时按 Nodes、Terminals 中可移动单元的顺序返回组号。
+    // 输入检查失败时不改变原坐标或 groupIds。
+    void clusterPlace(const CoreRegion& region, unsigned int seed = 42,
+                      std::vector<std::size_t>* groupIds = nullptr);
 
     // 将当前布局导出为 Bookshelf .pl 文件，只读取数据，不重新随机布局。
     // filename：输出文件路径；相对路径以程序运行目录为基准，父目录必须已存在。
