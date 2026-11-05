@@ -1,20 +1,28 @@
-# cmake needs this line
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.16)
+project(myplacement LANGUAGES CXX)
 
-# Define project name
-project(myplacement)
-
-# Declare the executable target built from your sources
-add_executable(
-    myplace
+# 当前阶段只有命令行布局，不需要链接尚未使用的 X11 绘图库。
+add_executable(myplace
     myplace_main.cpp
-    #${PROJECT_SOURCE_DIR}/MyPlace/myplace.cpp
-    ${PROJECT_SOURCE_DIR}/PlaceData/placedata.cpp
+    MyPlace/myplace.cpp
+    MyPlace/initial_place_io.cpp
+    MyPlace/placement_report.cpp
+    PlaceData/placedata.cpp
 )
-include_directories (
-    ${PROJECT_SOURCE_DIR}/MyPlace
-    ${PROJECT_SOURCE_DIR}/PlaceData
-    ${PROJECT_SOURCE_DIR}/Common
-    )
+target_include_directories(myplace PRIVATE MyPlace PlaceData Common)
+if(WIN32)
+    # 读取原始Unicode命令行参数，避免文件名在进入程序前被替换。
+    target_link_libraries(myplace PRIVATE shell32)
+endif()
+set_target_properties(myplace PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS NO
+)
+if(MSVC)
+    target_compile_options(myplace PRIVATE /W4 /utf-8)
+else()
+    target_compile_options(myplace PRIVATE -Wall -Wextra -pedantic)
+endif()
 
-target_link_libraries(myplace "-lm -ldl -lX11")
+# test_data 按团队约定被忽略；正式构建不引用仅存在于本机的测试文件。
