@@ -17,6 +17,19 @@ struct CoreRegion
     float ymax; // 上边界的纵坐标；不是区域高度。
 };
 
+// 一轮中单个方向的建表和求解记录，仅在布局成功后返回。
+struct QuadraticSolveStats
+{
+    int round;
+    char axis;
+    std::size_t triplets;
+    std::size_t storedCoefficients;
+    int iterations;
+    double residual;
+    double assemblyMilliseconds;
+    double solveMilliseconds;
+};
+
 // 前向声明：先告诉编译器存在这些类，完整定义在下面。
 class Bin_2D;
 class MyPlacer;
@@ -47,7 +60,7 @@ public:
 };
 
 // MyPlacer：布局算法的执行者，通过 db 访问单元并更新位置。
-// 当前提供随机布局、聚类驱动布局和结果导出。
+// 当前提供三种初始布局和结果导出。
 // 网格、面积统计和梯度字段是后续算法的预留数据。
 class MyPlacer
 {
@@ -76,6 +89,11 @@ public:
     // 输入检查失败时不改变原坐标或 groupIds。
     void clusterPlace(const CoreRegion& region, unsigned int seed = 42,
                       std::vector<std::size_t>* groupIds = nullptr);
+
+    // 从区域中心起步，按管脚距离重算权重并解三轮方程。
+    // 全部求解和限位成功后才写回可移动单元的 center 及可选的求解记录。
+    void quadraticPlace(const CoreRegion& region,
+                        std::vector<QuadraticSolveStats>* solveStats = nullptr);
 
     // 将当前布局导出为 Bookshelf .pl 文件，只读取数据，不重新随机布局。
     // filename：输出文件路径；相对路径以程序运行目录为基准，父目录必须已存在。

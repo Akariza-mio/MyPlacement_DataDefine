@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 project(myplacement LANGUAGES CXX)
 
+find_package(Eigen3 3.4 REQUIRED NO_MODULE)
+
 # 当前阶段只有命令行布局，不需要链接尚未使用的 X11 绘图库。
 add_executable(myplace
     myplace_main.cpp
@@ -10,6 +12,7 @@ add_executable(myplace
     PlaceData/placedata.cpp
 )
 target_include_directories(myplace PRIVATE MyPlace PlaceData Common)
+target_link_libraries(myplace PRIVATE Eigen3::Eigen)
 if(WIN32)
     # 读取原始Unicode命令行参数，避免文件名在进入程序前被替换。
     target_link_libraries(myplace PRIVATE shell32)

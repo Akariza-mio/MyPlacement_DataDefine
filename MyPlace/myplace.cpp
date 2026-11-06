@@ -1,5 +1,7 @@
 #include "myplace.h"
+#include <Eigen/IterativeLinearSolvers>
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -9,6 +11,7 @@
 #include <memory>
 #include <queue>
 #include <random>
+#include <sstream>
 #include <stdexcept>
 #include <unordered_map>
 #include <unordered_set>
@@ -270,6 +273,236 @@ void arrangeCluster(Cluster& group, const CoreRegion& region,
             static_cast<float>(std::clamp<double>(y, range.y.first, range.y.second)));
     }
 }
+
+constexpr int quadraticRounds = 3;
+constexpr double quadraticMinDistance = 25.0;
+constexpr double quadraticTolerance = 1e-8;
+constexpr int quadraticIterationLimit = 1000;
+constexpr int fixedPinRow = -1;
+
+class MovableComponents {
+public:
+    explicit MovableComponents(std::size_t count) : parent(count, -1) {}
+
+    int root(int row) {
+        while (parent[row] >= 0) {
+            if (parent[parent[row]] >= 0) parent[row] = parent[parent[row]];
+            row = parent[row];
+        }
+        return row;
+    }
+
+    void join(int first, int second) {
+        first = root(first);
+        second = root(second);
+        if (first == second) return;
+        // 根记录组大小的负数，把较小的组并入较大的组。
+        if (parent[first] > parent[second]) std::swap(first, second);
+        parent[first] += parent[second];
+        parent[second] = first;
+    }
+
+private:
+    std::vector<int> parent;
+};
+
+struct QuadraticPin {
+    int row;
+    double x; // 可移动管脚存偏移，固定管脚存绝对坐标。
+    double y;
+};
+
+struct QuadraticNet {
+    std::size_t begin;
+    std::size_t movableEnd;
+    std::size_t end;
+};
+
+struct QuadraticTopology {
+    std::vector<QuadraticPin> pins;
+    std::vector<QuadraticNet> nets;
+    std::vector<int> referenceRows;
+    std::size_t tripletCount;
+};
+
+QuadraticTopology collectQuadraticTopology(const PlaceData& db,
+                                           const std::vector<PlacementRange>& ranges)
+{
+    // Eigen 的默认稀疏存储用 int 保存下标和累计项数。
+    const std::size_t indexLimit = std::numeric_limits<int>::max();
+    if (ranges.size() > indexLimit) throw std::length_error("Too many movable modules for Eigen");
+    QuadraticTopology topology{{}, {}, {}, ranges.size()};
+    topology.pins.reserve(db.Pins.size());
+    topology.nets.reserve(db.Nets.size());
+    std::unordered_map<const Module*, int> rows;
+    rows.reserve(db.Nodes.size() + db.Terminals.size());
+    for (std::size_t row = 0; row < ranges.size(); ++row) {
+        rows.emplace(ranges[row].module, static_cast<int>(row));
+    }
+    for (const auto* modules : {&db.Nodes, &db.Terminals}) {
+        for (const Module* module : *modules) {
+            if (module->isFixed) rows.emplace(module, fixedPinRow);
+        }
+    }
+
+    MovableComponents components(ranges.size());
+    std::vector<bool> touchesFixed(ranges.size(), false);
+    std::vector<std::size_t> pinsPerRow(ranges.size(), 0);
+    std::unordered_set<const Net*> seenNets;
+    seenNets.reserve(db.Nets.size());
+    std::unordered_set<const Pin*> seenPins;
+    for (const Net* net : db.Nets) {
+        if (!net || !seenNets.insert(net).second) {
+            throw std::invalid_argument("Null or duplicate net in PlaceData::Nets");
+        }
+        const auto begin = topology.pins.size();
+        seenPins.clear();
+        for (const Pin* pin : net->netPins) {
+            if (!pin || pin->net != net || !seenPins.insert(pin).second) {
+                throw std::invalid_argument("Null, duplicate or misplaced pin in Net::netPins");
+            }
+            const auto entry = rows.find(pin->module);
+            if (entry == rows.end()) {
+                throw std::invalid_argument("Pin references a module outside PlaceData");
+            }
+            double x = pin->offset.x;
+            double y = pin->offset.y;
+            if (entry->second == fixedPinRow) {
+                x += pin->module->center.x;
+                y += pin->module->center.y;
+            }
+            if (!std::isfinite(x) || !std::isfinite(y)) {
+                throw std::invalid_argument("Nonfinite pin coordinate for module: " + pin->module->name);
+            }
+            topology.pins.push_back({entry->second, x, y});
+        }
+
+        // 把固定管脚放在末尾，求解时直接略过所有固定–固定组合。
+        const auto movableEnd = std::partition(topology.pins.begin() + begin, topology.pins.end(),
+            [](const QuadraticPin& pin) { return pin.row != fixedPinRow; });
+        const auto end = topology.pins.size();
+        const auto split = static_cast<std::size_t>(movableEnd - topology.pins.begin());
+        if (split == begin || end - begin < 2) {
+            topology.pins.resize(begin);
+            continue;
+        }
+
+        const int firstRow = topology.pins[begin].row;
+        if (split < end) touchesFixed[firstRow] = true;
+        for (auto index = begin; index < split; ++index) {
+            const int row = topology.pins[index].row;
+            components.join(firstRow, row);
+            // 每个不同单元的移动管脚对只生成一条下三角记录。
+            const auto newPairs = index - begin - pinsPerRow[row]++;
+            if (newPairs > indexLimit - topology.tripletCount) {
+                throw std::length_error("Too many pin pairs for Eigen sparse storage");
+            }
+            topology.tripletCount += newPairs;
+        }
+        for (auto index = begin; index < split; ++index) pinsPerRow[topology.pins[index].row] = 0;
+        topology.nets.push_back({begin, split, end});
+    }
+
+    std::vector<bool> hasReference(ranges.size(), false);
+    for (std::size_t row = 0; row < ranges.size(); ++row) {
+        if (touchesFixed[row]) hasReference[components.root(static_cast<int>(row))] = true;
+    }
+    // 按行号从小到大选代表，给每个无固定参照的组补一个临时参照。
+    for (std::size_t row = 0; row < ranges.size(); ++row) {
+        const int root = components.root(static_cast<int>(row));
+        if (hasReference[root]) continue;
+        topology.referenceRows.push_back(static_cast<int>(row));
+        hasReference[root] = true;
+    }
+    return topology;
+}
+
+using SparsePlacementMatrix = Eigen::SparseMatrix<double>;
+using PlacementTriplet = Eigen::Triplet<double>;
+
+struct AxisPin {
+    int row;
+    double offsetOrFixedCoordinate;
+    double currentCoordinate;
+};
+
+void assembleQuadraticAxis(const QuadraticTopology& topology, const Eigen::VectorXd& current,
+                           const Eigen::VectorXd& initial, char axis,
+                           SparsePlacementMatrix& matrix, Eigen::VectorXd& rhs)
+{
+    std::vector<AxisPin> pins;
+    pins.reserve(topology.pins.size());
+    for (const QuadraticPin& pin : topology.pins) {
+        const double coordinate = axis == 'x' ? pin.x : pin.y;
+        const double base = pin.row == fixedPinRow ? 0.0 : current[pin.row];
+        pins.push_back({pin.row, coordinate, base + coordinate});
+    }
+    Eigen::VectorXd diagonal = Eigen::VectorXd::Zero(current.size());
+    std::vector<PlacementTriplet> triplets;
+    triplets.reserve(topology.tripletCount);
+    for (const QuadraticNet& net : topology.nets) {
+        const double pinCountMinusOne = static_cast<double>(net.end - net.begin - 1);
+        for (auto i = net.begin; i < net.movableEnd; ++i) {
+            const AxisPin& p = pins[i];
+            for (auto j = i + 1; j < net.end; ++j) {
+                const AxisPin& q = pins[j];
+                if (p.row == q.row) continue;
+                const double distance = std::abs(p.currentCoordinate - q.currentCoordinate);
+                const double weight = 1.0 / (pinCountMinusOne * std::max(distance, quadraticMinDistance));
+                const double right = weight * (q.offsetOrFixedCoordinate - p.offsetOrFixedCoordinate);
+                diagonal[p.row] += weight;
+                rhs[p.row] += right;
+                if (q.row == fixedPinRow) continue;
+                diagonal[q.row] += weight;
+                rhs[q.row] -= right;
+                triplets.emplace_back(std::max(p.row, q.row), std::min(p.row, q.row), -weight);
+            }
+        }
+    }
+    for (const int row : topology.referenceRows) {
+        const double weight = diagonal[row] > 0.0 ? diagonal[row] : 1.0;
+        diagonal[row] += weight;
+        rhs[row] += weight * initial[row];
+    }
+    for (int row = 0; row < current.size(); ++row) {
+        triplets.emplace_back(row, row, diagonal[row]);
+    }
+    // 同一矩阵位置可能来自不同管脚对，Eigen 压缩时会累加。
+    matrix.setFromTriplets(triplets.begin(), triplets.end());
+}
+
+Eigen::VectorXd solveQuadraticAxis(const QuadraticTopology& topology, const Eigen::VectorXd& current,
+                                   const Eigen::VectorXd& initial, QuadraticSolveStats& stats)
+{
+    using Clock = std::chrono::steady_clock;
+    const auto started = Clock::now();
+    SparsePlacementMatrix matrix(current.size(), current.size());
+    Eigen::VectorXd rhs = Eigen::VectorXd::Zero(current.size());
+    assembleQuadraticAxis(topology, current, initial, stats.axis, matrix, rhs);
+    const auto assembled = Clock::now();
+
+    Eigen::ConjugateGradient<SparsePlacementMatrix, Eigen::Lower> solver;
+    solver.setTolerance(quadraticTolerance);
+    solver.setMaxIterations(quadraticIterationLimit);
+    solver.compute(matrix);
+    const Eigen::VectorXd result = solver.solveWithGuess(rhs, current);
+    const double residual = (matrix.selfadjointView<Eigen::Lower>() * result - rhs).norm()
+                          / std::max(1.0, rhs.norm());
+    if (solver.info() != Eigen::Success || !result.allFinite() || !std::isfinite(residual)
+            || residual > quadraticTolerance) {
+        std::ostringstream message;
+        message << "quadratic solve failed at round " << stats.round << ", axis " << stats.axis
+                << " (iterations=" << solver.iterations() << ", residual=" << residual << ')';
+        throw std::runtime_error(message.str());
+    }
+    stats.triplets = topology.tripletCount;
+    stats.storedCoefficients = static_cast<std::size_t>(matrix.nonZeros());
+    stats.iterations = static_cast<int>(solver.iterations());
+    stats.residual = residual;
+    stats.assemblyMilliseconds = std::chrono::duration<double, std::milli>(assembled - started).count();
+    stats.solveMilliseconds = std::chrono::duration<double, std::milli>(Clock::now() - assembled).count();
+    return result;
+}
 }
 
 void MyPlacer::randomPlace(const CoreRegion& region, unsigned int seed)
@@ -326,6 +559,50 @@ void MyPlacer::clusterPlace(const CoreRegion& region, unsigned int seed,
     if (groupIds) groupIds->swap(ids);
     for (std::size_t i = 0; i < ranges.size(); ++i) {
         ranges[i].module->center = positions[i];
+    }
+}
+
+void MyPlacer::quadraticPlace(const CoreRegion& region, std::vector<QuadraticSolveStats>* solveStats)
+{
+    if (!db) throw std::invalid_argument("quadraticPlace requires a PlaceData database");
+    const auto ranges = collectPlacementRanges(*db, region);
+    if (ranges.empty()) {
+        if (solveStats) solveStats->clear();
+        return;
+    }
+    const auto topology = collectQuadraticTopology(*db, ranges);
+    const double coreX = (static_cast<double>(region.xmin) + region.xmax) / 2.0;
+    const double coreY = (static_cast<double>(region.ymin) + region.ymax) / 2.0;
+    Eigen::VectorXd x(ranges.size()), y(ranges.size());
+    for (std::size_t row = 0; row < ranges.size(); ++row) {
+        const auto& range = ranges[row];
+        x[row] = std::clamp<double>(coreX, range.x.first, range.x.second);
+        y[row] = std::clamp<double>(coreY, range.y.first, range.y.second);
+    }
+    const Eigen::VectorXd initialX = x;
+    const Eigen::VectorXd initialY = y;
+    std::vector<QuadraticSolveStats> records;
+    records.reserve(2 * quadraticRounds);
+    for (int round = 1; round <= quadraticRounds; ++round) {
+        QuadraticSolveStats xStats{};
+        xStats.round = round;
+        xStats.axis = 'x';
+        x = solveQuadraticAxis(topology, x, initialX, xStats);
+        QuadraticSolveStats yStats{};
+        yStats.round = round;
+        yStats.axis = 'y';
+        y = solveQuadraticAxis(topology, y, initialY, yStats);
+        records.push_back(xStats);
+        records.push_back(yStats);
+        for (std::size_t row = 0; row < ranges.size(); ++row) {
+            const auto& range = ranges[row];
+            x[row] = std::clamp<double>(x[row], range.x.first, range.x.second);
+            y[row] = std::clamp<double>(y[row], range.y.first, range.y.second);
+        }
+    }
+    if (solveStats) solveStats->swap(records);
+    for (std::size_t row = 0; row < ranges.size(); ++row) {
+        ranges[row].module->center = POS_2D(static_cast<float>(x[row]), static_cast<float>(y[row]));
     }
 }
 

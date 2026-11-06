@@ -83,11 +83,12 @@ std::string outputFileName(const fs::path& path) {
 
 void usage(std::ostream& out) {
     out << "Usage: myplace --input-dir DIR --benchmark NAME --output FILE\n"
-           "               [--method random|cluster] [--seed UINT] [--report FILE]\n"
+           "               [--method random|cluster|quadratic] [--seed UINT] [--report FILE]\n"
            "               [--groups FILE]\n\n"
            "Reads NAME.nodes/.pl/.scl/.nets, keeps fixed modules unchanged,\n"
            "and writes an initial placement. Overlaps are allowed.\n"
            "Defaults: method random, seed 42, report FILE.report.json.\n"
+           "Quadratic placement starts at the core center and ignores the seed.\n"
            "--groups saves a cluster-membership CSV and requires --method cluster.\n"
            "Only orientation N is supported in this stage.\n";
 }
@@ -118,8 +119,8 @@ Options parseOptions(const std::vector<std::string>& arguments) {
     }
     if (options.inputDirectory.empty() || options.benchmark.empty() || options.output.empty())
         throw std::invalid_argument("--input-dir, --benchmark and --output are required");
-    if (options.method != "random" && options.method != "cluster")
-        throw std::invalid_argument("Unsupported method: " + options.method + " (use random or cluster)");
+    if (options.method != "random" && options.method != "cluster" && options.method != "quadratic")
+        throw std::invalid_argument("Unsupported method: " + options.method + " (use random, cluster or quadratic)");
     if (!options.groups.empty() && options.method != "cluster")
         throw std::invalid_argument("--groups requires --method cluster");
     if (options.report.empty()) options.report = fs::u8path(options.output.u8string()+".report.json");
@@ -194,7 +195,8 @@ std::string jsonString(const std::string& value) {
 }
 
 void writeReport(const Options& options, const initial_place::LoadedCircuit& circuit,
-                 const initial_place::PlacementReport& result, double milliseconds) {
+                 const initial_place::PlacementReport& result, double milliseconds,
+                 const std::vector<QuadraticSolveStats>& quadraticSolves) {
     std::ofstream out(options.report);
     if (!out) throw std::runtime_error("Cannot open report: " + options.report.u8string());
     out.imbue(std::locale::classic());
@@ -227,8 +229,23 @@ void writeReport(const Options& options, const initial_place::LoadedCircuit& cir
         << ",\n  \"fixed_changed\": " << result.fixedChanged
         << ",\n  \"invalid_modules\": " << result.invalidModules
         << ",\n  \"hpwl\": " << result.hpwl
-        << ",\n  \"placement_milliseconds\": " << milliseconds
-        << ",\n  \"overlaps_allowed\": true\n}\n";
+        << ",\n  \"placement_milliseconds\": " << milliseconds;
+    if (options.method == "quadratic") {
+        out << ",\n  \"quadratic_solves\": [";
+        for (std::size_t i = 0; i < quadraticSolves.size(); ++i) {
+            const auto& solve = quadraticSolves[i];
+            if (i != 0) out << ',';
+            out << "\n    {\"round\": " << solve.round << ", \"axis\": \"" << solve.axis << '"'
+                << ", \"triplets\": " << solve.triplets
+                << ", \"stored_coefficients\": " << solve.storedCoefficients
+                << ", \"iterations\": " << solve.iterations << ", \"residual\": " << solve.residual
+                << ", \"assembly_milliseconds\": " << solve.assemblyMilliseconds
+                << ", \"solve_milliseconds\": " << solve.solveMilliseconds << '}';
+        }
+        if (!quadraticSolves.empty()) out << "\n  ";
+        out << ']';
+    }
+    out << ",\n  \"overlaps_allowed\": true\n}\n";
     out.close();
     if (!out) throw std::runtime_error("Failed to save report: " + options.report.u8string());
 }
@@ -271,11 +288,18 @@ int main(int argc, char** argv) {
         const auto before = initial_place::capturePlacement(circuit.db);
         MyPlacer placer(&circuit.db);
         std::vector<std::size_t> groupIds;
+        std::vector<QuadraticSolveStats> quadraticSolves;
 
         // 只统计安排位置的时间，加载、检查和保存都在计时区间之外。
         const auto start = std::chrono::steady_clock::now();
         if (options.method == "cluster") {
             placer.clusterPlace(circuit.region, options.seed, options.groups.empty() ? nullptr : &groupIds);
+        } else if (options.method == "quadratic") {
+            try {
+                placer.quadraticPlace(circuit.region, &quadraticSolves);
+            } catch (const std::exception& error) {
+                throw std::runtime_error(options.benchmark + ": " + error.what());
+            }
         } else {
             placer.randomPlace(circuit.region, options.seed);
         }
@@ -291,7 +315,7 @@ int main(int argc, char** argv) {
             writeGroups(options.groups, circuit.db, groupIds);
             checkDistinctOutputs(options);
         }
-        writeReport(options, circuit, report, milliseconds);
+        writeReport(options, circuit, report, milliseconds, quadraticSolves);
         std::cout << "SUCCESS: method=" << options.method << " seed=" << options.seed
                   << " modules=" << report.totalModules << " movable=" << report.movableModules
                   << " fixed=" << report.fixedModules << " HPWL=" << std::setprecision(15) << report.hpwl
