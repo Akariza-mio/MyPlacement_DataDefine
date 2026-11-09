@@ -235,7 +235,7 @@ bool PlaceData::readAux(
             ss >> token;
             while(!token.empty()){
                 string tp;
-                for(int j = 0; j < token.size(); ++j){
+                for(int j = 0; j < (int)token.size(); ++j){
                     if(token[j] == '.'){
                         tp = token.substr(j);
                     }
@@ -286,8 +286,4 @@ void PlaceData::readBookShelf(const string& dir, const string& benchmarkname){
     readWts(wts_filepath);
     readScl(scl_filepath);
     readPl(pl_filepath);
-    cout << "[数据解析完成] 总普通单元数: " << Nodes.size() << ", 宏单元/IO数: " << Terminals.size() << endl;
-    cout << "[数据解析完成] 总标准单元拜访行数: " << SiteRows.size() << endl;
-    cout << "成功读取连线数: " << Nets.size() << " / " << netCount << endl;
-    cout << "成功读取引脚数: " << Pins.size() << " / " << pinCount << endl;
 }

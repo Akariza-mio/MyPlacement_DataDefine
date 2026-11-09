@@ -58,3 +58,4 @@ test_data/
 benchmarks/
 data/
 *.log
+res/
