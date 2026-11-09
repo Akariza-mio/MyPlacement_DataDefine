@@ -142,7 +142,9 @@ void PlaceData::readNets(const string& filename){
             ss >> colon >> pins_to_read >> net_name;
             nt = new Net();
             nt->idx = Nets.size();
+            nt->name = net_name;
             Nets.push_back(nt);
+            netMap[net_name] = nt;
         }else{
             if(pins_to_read > 0){
                 string node_name = token;
@@ -169,15 +171,121 @@ void PlaceData::readNets(const string& filename){
     }
     ifs.close();
 }
+void PlaceData::readWts(const string& filename){
+    ifstream ifs(filename);
+    if(!ifs.is_open()){
+        cerr << "failed to open file: " << filename << endl;
+        return;
+    }
+    string line;
+    while(getline(ifs,line)){
+        if(line.empty() || line[0] == '#' || line[0] == 'U'){
+            continue;
+        }
+        stringstream ss(line);
+        string object_name;
+        float weight;
+        ss >> object_name >> weight;
+        if(ss.fail()){
+            cerr << "invalid weight record in .wts: " << line << endl;
+            continue;
+        }
+        auto module_it = moduleMap.find(object_name);
+        if(module_it != moduleMap.end()){
+            module_it->second->weight = weight;
+            continue;
+        }
+        auto net_it = netMap.find(object_name);
+        if(net_it != netMap.end()){
+            net_it->second->weight = weight;
+        }else{
+            cerr << "unknown object name in .wts: " << object_name << endl;
+        }
+    }
+    ifs.close();
+}
+bool PlaceData::readAux(
+    string& nodes_filepath,
+    string& pl_filepath, 
+    string& scl_filepath, 
+    string& nets_filepath, 
+    string& wts_filepath,
+    const string& aux_filepath
+){
+    //读取aux文件来获取其他文件路径
+    ifstream ifs(aux_filepath);
+    if(!ifs.is_open()){
+        cerr << "failed to open file: " << aux_filepath << endl;
+        return false;
+    }
+    string line;
+    while(getline(ifs,line)){
+        if(line.empty()){
+            continue;
+        }
+        stringstream ss(line);
+        string token,colon;
+        ss >> token;
+        if(token == "RowBasedPlacement"){
+            ss >> colon;
+            if(colon != ":"){
+                cerr << "expected ':' after RowBasedPlacement in aux file" << endl;
+                return false;
+            }
+            ss >> token;
+            while(!token.empty()){
+                string tp;
+                for(int j = 0; j < token.size(); ++j){
+                    if(token[j] == '.'){
+                        tp = token.substr(j);
+                    }
+                }
+                if(tp == ".nodes"){
+                    nodes_filepath += token;
+                }else if(tp == ".pl"){
+                    pl_filepath += token;
+                }else if(tp == ".scl"){
+                    scl_filepath += token;
+                }else if(tp == ".nets"){
+                    nets_filepath += token;
+                }else if(tp == ".wts"){
+                    wts_filepath += token;
+                }
+                token.clear();
+                ss >> token;
+            }
+        }
+    }
+    ifs.close();
+    return true;
+}
 void PlaceData::readBookShelf(const string& dir, const string& benchmarkname){
-    //dir = ./test_data/adaptec1    benchmark = adaptec1
+    //dir = ./test_data/adaptec1    benchmarkname = adaptec1
     string file_path_prefix = dir + "/" + benchmarkname;
     cout << "开始解析此路径文件：" << dir << "...\n";
     //开始解析BookShelf
-    readNodes(file_path_prefix + ".nodes");
-    readPl(file_path_prefix + ".pl");
-    readScl(file_path_prefix + ".scl");
-    readNets(file_path_prefix + ".nets");
+    string nodes_filepath = dir + "/";
+    string pl_filepath = dir + "/";
+    string scl_filepath = dir + "/";
+    string nets_filepath = dir + "/";
+    string wts_filepath = dir + "/";
+    bool aux_read = readAux(
+        nodes_filepath,
+        pl_filepath, 
+        scl_filepath, 
+        nets_filepath, 
+        wts_filepath,
+        file_path_prefix + ".aux"
+    );
+    if(!aux_read){
+        cerr << "failed to read aux file: " << file_path_prefix + ".aux" << endl;
+        return;
+    }
+    readNodes(nodes_filepath);
+    readNets(nets_filepath);
+    readWts(wts_filepath);
+    readScl(scl_filepath);
+    readPl(pl_filepath);
     cout << "[数据解析完成] 总普通单元数: " << Nodes.size() << ", 宏单元/IO数: " << Terminals.size() << endl;
     cout << "[数据解析完成] 总标准单元拜访行数: " << SiteRows.size() << endl;
     cout << "成功读取连线数: " << Nets.size() << " / " << netCount << endl;

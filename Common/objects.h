@@ -20,6 +20,8 @@ public:
     float width;
     float height;
     float area;
+    //单元权重
+    float weight;
     float orientation;
     bool isMacro;
     bool isFixed;
@@ -33,6 +35,8 @@ public:
         width = 0;
         height = 0;
         area = 0;
+        //权重初始化为0
+        weight = 0;
         orientation = 0;
         isMacro = false;
         isFiller = false;
@@ -90,11 +94,16 @@ public:
         init();
     }
     int idx;
+    //为网络增加了名称和权重
+    string name;
+    float weight;
     vector<Pin *> netPins;
 
     void init()
     {
         idx = 0;
+        //网络权重初始化为1
+        weight = 1;
         netPins.clear();
     }
 };
