@@ -37,6 +37,7 @@ void PlaceData::readNodes(const string& filename){
             tp_mod->name = node_name;
             tp_mod->width = w;
             tp_mod->height = h;
+            tp_mod->area = w * h;
             tp_mod->idx = Nodes.size() + Terminals.size();
             string type = "";
             ss >> type;
@@ -65,12 +66,25 @@ void PlaceData::readPl(const string& filename){
         }
         stringstream ss(line);
         string node_name;
+        string colon;
+        string orientation;
+        string fixed_marker;
         float x,y;
-        ss >> node_name >> x >> y;
+        ss >> node_name >> x >> y >> colon >> orientation;
+        bool is_fixed = false;
+        if(ss >> fixed_marker){
+            if(fixed_marker != "/FIXED"){
+                cerr << "unknown placement flag in .pl for node " << node_name << ": " << fixed_marker << endl;
+                continue;
+            }
+            is_fixed = true;
+        }
         auto it = moduleMap.find(node_name);
         if(it != moduleMap.end()){
             it->second->center.x = x;
             it->second->center.y = y;
+            it->second->orientation = 0;
+            it->second->isFixed = is_fixed;
         }else{
             cerr << "unknown node name in .pl: " << node_name << endl;
         }
