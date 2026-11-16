@@ -1,5 +1,5 @@
 #pragma once
-#include "PlaceData.h"
+#include "placedata.h"
 #include <vector>
 
 struct BinGrid
@@ -18,29 +18,29 @@ public:
     void run(PlaceData* db);
 
 private:
-    // ³õÊ¼»¯½×¶Î
+    // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½×¶ï¿½
     void FillerInit(PlaceData* db);
     void BinInit(PlaceData* db);
     void GradientVectorInitialization(PlaceData* db);
     double PenaltyFactorInit(PlaceData* db);
 
-    // ÌÝ¶È¼ÆËã
+    // ï¿½Ý¶È¼ï¿½ï¿½ï¿½
     void UpdateBinDensities(PlaceData* db);
     void ComputeDensityGradient(PlaceData* db);
     void ComputeWirelengthGradient(PlaceData* db);
     void GetTotalGradient(PlaceData* db, double lambda);
 
-    // Nesterov NAG ¸üÐÂ
+    // Nesterov NAG ï¿½ï¿½ï¿½ï¿½
     void NesterovUpdate(PlaceData* db, double alpha, double beta);
 
-    // ²ÎÊý×ÔÊÊÓ¦
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦
     double UpdateLambda(double oldLambda, double deltaHPWL);
 
-    // ÆÀ¹Àº¯Êý
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     double ComputeHPWL(PlaceData* db);
     double ComputeTauOverflow(PlaceData* db);
 
-    // ³ÉÔ±±äÁ¿
+    // ï¿½ï¿½Ô±ï¿½ï¿½ï¿½ï¿½
     std::vector<Module*> fillerNodes;
     std::vector<Module*> nodesAndFillers;
     std::vector<std::vector<BinGrid>> bins;
@@ -49,13 +49,13 @@ private:
     POS_2D chipLL;
     POS_2D chipUR;
 
-    // ÌÝ¶ÈÊý×é
+    // ï¿½Ý¶ï¿½ï¿½ï¿½ï¿½ï¿½
     std::vector<double> gradWireX, gradWireY;
     std::vector<double> gradDenX, gradDenY;
     std::vector<double> gradTotalX, gradTotalY;
-    std::vector<double> vx, vy; // Nesterov¶¯Á¿
+    std::vector<double> vx, vy; // Nesterovï¿½ï¿½ï¿½ï¿½
 
-    // ³¬²ÎÊý
+    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
     double betaMomentum{ 0.80 };
     double targetTau{ 0.10 };
     int maxIter{ 1000 };
