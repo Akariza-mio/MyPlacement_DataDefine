@@ -17,6 +17,8 @@
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include "GlobalPlacement.h"
+
 
 namespace {
 // 将一个方向的中心允许区间转换为 float 能准确表示的安全端点。
