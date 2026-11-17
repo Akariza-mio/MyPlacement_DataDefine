@@ -17,10 +17,10 @@ inline double rectOverlapArea(double ax0, double ay0, double ax1, double ay1,
 // »ñÈ¡module°üÎ§ºÐ£ºleft bottom right top
 inline void getModuleBBox(const Module* m, double& lx, double& ly, double& rx, double& ry)
 {
-    const double hw = m->width * 0.5;
-    const double hh = m->height * 0.5;
-    lx = m->center.x - hw;
-    ly = m->center.y - hh;
-    rx = m->center.x + hw;
-    ry = m->center.y + hh;
+    const double hw = static_cast<double>(m->width) * 0.5;
+    const double hh = static_cast<double>(m->height) * 0.5;
+    lx = static_cast<double>(m->center.x) - hw;
+    ly = static_cast<double>(m->center.y) - hh;
+    rx = static_cast<double>(m->center.x) + hw;
+    ry = static_cast<double>(m->center.y) + hh;
 }

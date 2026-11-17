@@ -1,6 +1,7 @@
 #pragma once
-#include "placedata.h"
+#include "PlaceData.h"
 #include <vector>
+#include <fstream>
 
 struct BinGrid
 {
@@ -18,29 +19,33 @@ public:
     void run(PlaceData* db);
 
 private:
-    // ï¿½ï¿½Ê¼ï¿½ï¿½ï¿½×¶ï¿½
+    // ³õÊ¼»¯½×¶Î
     void FillerInit(PlaceData* db);
     void BinInit(PlaceData* db);
     void GradientVectorInitialization(PlaceData* db);
     double PenaltyFactorInit(PlaceData* db);
 
-    // ï¿½Ý¶È¼ï¿½ï¿½ï¿½
+    // ÌÝ¶È¼ÆËã
     void UpdateBinDensities(PlaceData* db);
     void ComputeDensityGradient(PlaceData* db);
-    void ComputeWirelengthGradient(PlaceData* db);
+    void ComputeWirelengthGradientWA(PlaceData* db);
     void GetTotalGradient(PlaceData* db, double lambda);
 
-    // Nesterov NAG ï¿½ï¿½ï¿½ï¿½
+    // Nesterov NAG ¸üÐÂ + Èí±ß½ç
     void NesterovUpdate(PlaceData* db, double alpha, double beta);
+    double BoundaryPenaltyGrad(double pos, double ll, double ur, double k = 1e3);
 
-    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½Ó¦
+    // ²ÎÊý×ÔÊÊÓ¦
     double UpdateLambda(double oldLambda, double deltaHPWL);
 
-    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ÆÀ¹Àº¯Êý
     double ComputeHPWL(PlaceData* db);
     double ComputeTauOverflow(PlaceData* db);
 
-    // ï¿½ï¿½Ô±ï¿½ï¿½ï¿½ï¿½
+    // ¹¤¾ß
+    bool IsValidFinite(double val);
+
+    // ³ÉÔ±±äÁ¿
     std::vector<Module*> fillerNodes;
     std::vector<Module*> nodesAndFillers;
     std::vector<std::vector<BinGrid>> bins;
@@ -49,15 +54,20 @@ private:
     POS_2D chipLL;
     POS_2D chipUR;
 
-    // ï¿½Ý¶ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ÌÝ¶ÈÊý×é
     std::vector<double> gradWireX, gradWireY;
     std::vector<double> gradDenX, gradDenY;
     std::vector<double> gradTotalX, gradTotalY;
-    std::vector<double> vx, vy; // Nesterovï¿½ï¿½ï¿½ï¿½
+    std::vector<double> vx, vy; // Nesterov¶¯Á¿
 
-    // ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+    // ³¬²ÎÊý
     double betaMomentum{ 0.80 };
     double targetTau{ 0.10 };
     int maxIter{ 1000 };
     double targetBinDensity{ 0.75 };
+    double gammaWA{ 80.0 };
+    double boundK{ 1200.0 }; // Èí±ß½ç³Í·£Ç¿¶È
+    int samplePinThresh{ 12 };//´óÍø²ÉÑùãÐÖµ£¬³¬¹ý¸ÃÒý½ÅÊýÆôÓÃ²ÉÑù½üËÆ
+
+    std::ofstream iterLogFile;
 };
