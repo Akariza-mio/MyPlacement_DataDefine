@@ -137,17 +137,29 @@ namespace {
 #endif
     }
 
+    fs::path globalIterationLogPath(const Options& options) {
+        if (options.method != "global") return {};
+        return fs::u8path(options.output.u8string() + ".iterations.csv");
+    }
+
     void checkDistinctOutputs(const Options& options) {
         if (sameFile(options.output, options.report))
             throw std::invalid_argument("Placement and report must use different output files");
         if (!options.groups.empty()
             && (sameFile(options.groups, options.output) || sameFile(options.groups, options.report)))
             throw std::invalid_argument("Group CSV must use a separate output file");
+        const fs::path iterationLog = globalIterationLogPath(options);
+        if (!iterationLog.empty()
+            && (sameFile(iterationLog, options.output) || sameFile(iterationLog, options.report)
+                || (!options.groups.empty() && sameFile(iterationLog, options.groups))))
+            throw std::invalid_argument("Global iteration log must use a separate output file");
     }
 
     void prepareOutput(const Options& options) {
         std::vector<fs::path> targets{ options.output, options.report };
         if (!options.groups.empty()) targets.push_back(options.groups);
+        const fs::path iterationLog = globalIterationLogPath(options);
+        if (!iterationLog.empty()) targets.push_back(iterationLog);
 #ifdef _WIN32
         for (const auto& target : targets) {
             for (const auto& component : target.relative_path()) {
@@ -188,7 +200,8 @@ namespace {
 
     void writeReport(const Options& options, const initial_place::LoadedCircuit& circuit,
         const initial_place::PlacementReport& result, double milliseconds,
-        const std::vector<QuadraticSolveStats>& quadraticSolves) {
+        const std::vector<QuadraticSolveStats>& quadraticSolves,
+        const GlobalPlacementStats* globalStats) {
         std::ofstream out(options.report);
         if (!out) throw std::runtime_error("Cannot open report: " + options.report.u8string());
         out.imbue(std::locale::classic());
@@ -222,7 +235,7 @@ namespace {
             << ",\n  \"invalid_modules\": " << result.invalidModules
             << ",\n  \"hpwl\": " << result.hpwl
             << ",\n  \"placement_milliseconds\": " << milliseconds;
-        if (options.method == "quadratic") {
+        if (!quadraticSolves.empty()) {
             out << ",\n  \"quadratic_solves\": [";
             for (std::size_t i = 0; i < quadraticSolves.size(); ++i) {
                 const auto& solve = quadraticSolves[i];
@@ -236,6 +249,16 @@ namespace {
             }
             if (!quadraticSolves.empty()) out << "\n  ";
             out << ']';
+        }
+        if (globalStats) {
+            out << ",\n  \"global_converged\": " << (globalStats->converged ? "true" : "false")
+                << ",\n  \"global_iterations\": " << globalStats->iterations
+                << ",\n  \"global_best_iteration\": " << globalStats->bestIteration
+                << ",\n  \"global_initial_hpwl\": " << globalStats->initialHPWL
+                << ",\n  \"global_final_hpwl\": " << globalStats->finalHPWL
+                << ",\n  \"global_best_tau\": " << globalStats->bestTau
+                << ",\n  \"global_iteration_log\": "
+                << jsonString(fs::absolute(globalIterationLogPath(options)).u8string());
         }
         out << ",\n  \"overlaps_allowed\": true\n}\n";
         out.close();
@@ -281,6 +304,8 @@ int main(int argc, char** argv) {
         MyPlacer placer(&circuit.db);
         std::vector<std::size_t> groupIds;
         std::vector<QuadraticSolveStats> quadraticSolves;
+        GlobalPlacementStats globalStats;
+        bool hasGlobalStats = false;
 
         const auto start = std::chrono::steady_clock::now();
         if (options.method == "cluster") {
@@ -296,7 +321,10 @@ int main(int argc, char** argv) {
         }
         else if (options.method == "global") {
             GlobalPlacement gp;
-            gp.run(&circuit.db);
+            globalStats = gp.run(&circuit.db,
+                                 outputFileName(globalIterationLogPath(options)),
+                                 options.seed);
+            hasGlobalStats = true;
         }
         else {
             placer.randomPlace(circuit.region, options.seed);
@@ -311,8 +339,11 @@ int main(int argc, char** argv) {
             writeGroups(options.groups, circuit.db, groupIds);
             checkDistinctOutputs(options);
         }
-        writeReport(options, circuit, report, milliseconds, quadraticSolves);
+        writeReport(options, circuit, report, milliseconds, quadraticSolves,
+                    hasGlobalStats ? &globalStats : nullptr);
         std::cout << "SUCCESS: method=" << options.method << " seed=" << options.seed << " modules=" << report.totalModules << " movable=" << report.movableModules << " fixed=" << report.fixedModules << " HPWL=" << std::setprecision(15) << report.hpwl << " placement_ms=" << milliseconds << '\n' << "Placement: " << options.output.u8string() << '\n' << "Report: " << options.report.u8string() << '\n';
+        if (hasGlobalStats)
+            std::cout << "Iteration log: " << globalIterationLogPath(options).u8string() << '\n';
         return 0;
     }
     catch (const std::exception& error) {

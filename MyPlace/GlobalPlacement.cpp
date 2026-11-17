@@ -4,7 +4,7 @@
 // 目标函数：f(x,y) = Σ WL(e;x,y) + λ·D(x,y)
 //   WL：WA-LSE 平滑线长（公式(3)(4)(5)(6)，数值稳定实现）
 //   D ：静电类比密度惩罚（公式(7)~(11)、(20)(21)）
-// 求解：Nesterov 加速梯度法 + 密度溢出率驱动的停止判定
+// 求解：带动量的梯度下降 + 密度溢出率驱动的停止判定
 // ============================================================================
 
 #include "GlobalPlacement.h"
@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -42,9 +43,9 @@ bool GlobalPlacement::IsValidFinite(double val)
 double GlobalPlacement::BoundaryPenaltyGrad(double pos, double ll, double ur, double k) const
 {
     if (pos < ll)
-        return k * (ll - pos);
+        return k * (pos - ll);
     if (pos > ur)
-        return -k * (pos - ur);
+        return k * (pos - ur);
     return 0.0;
 }
 
@@ -53,14 +54,14 @@ double GlobalPlacement::BinCoordX(double x) const
     if (!(binWidth > 0.0))
         return 0.0;
     // 密度网格的第 i 个采样点位于第 i 个 bin 的中心，因此连续坐标为 (x-x0)/binWidth
-    return (x - static_cast<double>(chipLL.x)) / binWidth;
+    return (x - static_cast<double>(chipLL.x)) / binWidth - 0.5;
 }
 
 double GlobalPlacement::BinCoordY(double y) const
 {
     if (!(binHeight > 0.0))
         return 0.0;
-    return (y - static_cast<double>(chipLL.y)) / binHeight;
+    return (y - static_cast<double>(chipLL.y)) / binHeight - 0.5;
 }
 
 double GlobalPlacement::SampleField(const std::vector<double>& field, double bx, double by) const
@@ -201,7 +202,7 @@ void GlobalPlacement::FillerInit(PlaceData* db)
             const double usableW = static_cast<double>(chipUR.x) - static_cast<double>(chipLL.x) - side;
             const double usableH = static_cast<double>(chipUR.y) - static_cast<double>(chipLL.y) - side;
 
-            std::mt19937 rng(42);  // 固定种子，保证结果可复现
+            std::mt19937 rng(randomSeed ^ 0x9e3779b9u);
             std::uniform_real_distribution<double> distX(0.0, std::max(usableW, 0.0));
             std::uniform_real_distribution<double> distY(0.0, std::max(usableH, 0.0));
 
@@ -788,8 +789,12 @@ void GlobalPlacement::GetTotalGradient(PlaceData* db, double lambda)
         {
             const double cx = static_cast<double>(mod->center.x);
             const double cy = static_cast<double>(mod->center.y);
-            gx += BoundaryPenaltyGrad(cx, static_cast<double>(chipLL.x), static_cast<double>(chipUR.x), boundK);
-            gy += BoundaryPenaltyGrad(cy, static_cast<double>(chipLL.y), static_cast<double>(chipUR.y), boundK);
+            const double hw = static_cast<double>(mod->width) * 0.5;
+            const double hh = static_cast<double>(mod->height) * 0.5;
+            gx += BoundaryPenaltyGrad(cx, static_cast<double>(chipLL.x) + hw,
+                                      static_cast<double>(chipUR.x) - hw, boundK);
+            gy += BoundaryPenaltyGrad(cy, static_cast<double>(chipLL.y) + hh,
+                                      static_cast<double>(chipUR.y) - hh, boundK);
         }
 
         if (!IsValidFinite(gx)) gx = 0.0;
@@ -803,12 +808,12 @@ void GlobalPlacement::GetTotalGradient(PlaceData* db, double lambda)
 // 3. 位置更新与参数自适应
 // ============================================================================
 
-// Nesterov 动量更新：
+// 动量梯度更新：
 //   v_k = β·v_{k-1} + (1-β)·∇f
 //   x_{k+1} = x_k - α·v_k
 // 学习率 α 按"本次迭代允许的单步位移 stepLimit"归一化（α = stepLimit / 典型动量），
 // 这样不同规模、不同梯度量级的电路都能用同一套超参数稳定收敛。
-void GlobalPlacement::NesterovUpdate(PlaceData* db, double beta, double stepLimit)
+void GlobalPlacement::MomentumUpdate(PlaceData* db, double beta, double stepLimit)
 {
     double maxMomentum = 0.0;
     for (std::size_t i = 0; i < nodesAndFillers.size(); ++i)
@@ -886,14 +891,55 @@ void GlobalPlacement::NesterovUpdate(PlaceData* db, double beta, double stepLimi
     binDensityDirty = true;
 }
 
-// 随机散布：仅当输入 .pl 的密度溢出率过高（单元全部堆在原点/角点）时作为兜底起点。
+// 检查输入位置是否明显退化。只看 tau 不可靠：所有单元堆在一个 bin 时，
+// tau 常常仍小于 2，因此同时检查越界比例和坐标跨度。
+bool GlobalPlacement::NeedsScatterInit(const PlaceData* db) const
+{
+    std::size_t movableCount = 0;
+    std::size_t outsideCount = 0;
+    double xmin = std::numeric_limits<double>::max();
+    double xmax = -std::numeric_limits<double>::max();
+    double ymin = std::numeric_limits<double>::max();
+    double ymax = -std::numeric_limits<double>::max();
+
+    for (const Module* mod : db->Nodes)
+    {
+        if (!mod || mod->isFixed) continue;
+        ++movableCount;
+        const double cx = static_cast<double>(mod->center.x);
+        const double cy = static_cast<double>(mod->center.y);
+        const double hw = static_cast<double>(mod->width) * 0.5;
+        const double hh = static_cast<double>(mod->height) * 0.5;
+        xmin = std::min(xmin, cx); xmax = std::max(xmax, cx);
+        ymin = std::min(ymin, cy); ymax = std::max(ymax, cy);
+        if (cx - hw < chipLL.x || cx + hw > chipUR.x
+            || cy - hh < chipLL.y || cy + hh > chipUR.y)
+            ++outsideCount;
+    }
+
+    if (movableCount == 0)
+        return false;
+    if (outsideCount * 2 >= movableCount)
+        return true;
+
+    const double chipW = static_cast<double>(chipUR.x) - static_cast<double>(chipLL.x);
+    const double chipH = static_cast<double>(chipUR.y) - static_cast<double>(chipLL.y);
+    return movableCount >= 32
+        && ((xmax - xmin) < 0.02 * chipW || (ymax - ymin) < 0.02 * chipH);
+}
+
+// 随机散布：仅当输入 .pl 的位置明显退化（单元全部堆在原点/角点）时作为兜底起点。
 // 这不是本模块的核心算法，只是避免全局布局从一个"所有单元重合在一个点"的
 // 退化初始解出发——那种状态下芯片边界处的电场恒为 0（DCT 解满足零通量边界条件），
 // 单元得不到任何密度方向的推力，迭代会停滞。
 void GlobalPlacement::ScatterInit(PlaceData* db)
 {
-    std::mt19937 rng(20261017u);
-    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    std::mt19937 rng(randomSeed);
+    std::uniform_real_distribution<double> unit(-1.0, 1.0);
+    const double coreX = 0.5 * (static_cast<double>(chipLL.x) + static_cast<double>(chipUR.x));
+    const double coreY = 0.5 * (static_cast<double>(chipLL.y) + static_cast<double>(chipUR.y));
+    const double spreadX = 0.10 * (static_cast<double>(chipUR.x) - static_cast<double>(chipLL.x));
+    const double spreadY = 0.10 * (static_cast<double>(chipUR.y) - static_cast<double>(chipLL.y));
     for (Module* m : db->Nodes)
     {
         if (m->isFixed) continue;
@@ -903,8 +949,10 @@ void GlobalPlacement::ScatterInit(PlaceData* db)
         const double hiX = static_cast<double>(chipUR.x) - hw;
         const double loY = static_cast<double>(chipLL.y) + hh;
         const double hiY = static_cast<double>(chipUR.y) - hh;
-        const double x = (loX < hiX) ? (loX + (hiX - loX) * unit(rng)) : 0.5 * (loX + hiX);
-        const double y = (loY < hiY) ? (loY + (hiY - loY) * unit(rng)) : 0.5 * (loY + hiY);
+        const double x = (loX < hiX) ? clampValue(coreX + spreadX * unit(rng), loX, hiX)
+                                     : 0.5 * (loX + hiX);
+        const double y = (loY < hiY) ? clampValue(coreY + spreadY * unit(rng), loY, hiY)
+                                     : 0.5 * (loY + hiY);
         m->center.x = static_cast<float>(x);
         m->center.y = static_cast<float>(y);
     }
@@ -1025,10 +1073,17 @@ double GlobalPlacement::ComputeTauOverflow(PlaceData* /*db*/)
 // 5. 主流程
 // ============================================================================
 
-void GlobalPlacement::run(PlaceData* db)
+GlobalPlacementStats GlobalPlacement::run(PlaceData* db, const std::string& iterationLogPath,
+                                          unsigned int seed)
 {
     if (!db)
-        return;
+        throw std::invalid_argument("GlobalPlacement requires a non-null database");
+
+    GlobalPlacementStats stats;
+    randomSeed = seed;
+    hpwlHistory.clear();
+    lastTau = 1.0;
+    binDensityDirty = true;
 
     std::printf("==== ePlace 静电类比全局布局开始 ====\n");
 
@@ -1036,8 +1091,15 @@ void GlobalPlacement::run(PlaceData* db)
     if (!(static_cast<double>(chipUR.x) > static_cast<double>(chipLL.x))
         || !(static_cast<double>(chipUR.y) > static_cast<double>(chipLL.y)))
     {
-        std::printf("错误：无法确定有效的布局区域（SiteRow 为空且单元包围盒无效）\n");
-        return;
+        throw std::runtime_error("无法确定有效的布局区域（SiteRow 为空且单元包围盒无效）");
+    }
+
+    if (!iterationLogPath.empty())
+    {
+        iterLogFile.open(iterationLogPath);
+        if (!iterLogFile)
+            throw std::runtime_error("无法打开全局布局迭代日志: " + iterationLogPath);
+        iterLogFile << "iter,hpwl,tau,lambda\n";
     }
 
     // BinInit 先于 FillerInit：filler 总量需要知道终端/不可放置区域已占用的面积
@@ -1046,25 +1108,20 @@ void GlobalPlacement::run(PlaceData* db)
     GradientVectorInitialization(db);
     BuildNetPinIndex(db);
 
-    // 初始 .pl 可能把单元堆在芯片外（例如全部放在原点），先投影回 core 内部，
-    // 否则这些单元不会计入任何 bin 的密度，密度梯度会低估初始的严重堆叠。
+    // 先在投影前判断退化位置。当前 ISPD05 一类算例经常把全部可移动单元
+    // 写在 (0,0)，仅靠 tau 无法稳定识别这种输入。
+    if (NeedsScatterInit(db))
+    {
+        std::printf("检测到大量单元越界或坐标过度集中，先在Core中心附近散布作为全局布局起点\n");
+        ScatterInit(db);
+    }
     ClampModulesToChip(db);
 
-    // 退化初始解兜底：初始 .pl 若把所有单元都放在同一个点，
-    // 芯片边界处电场恒为 0（DCT 解满足零通量边界条件），迭代会停滞。
     UpdateBinDensities(db);
     lastTau = ComputeTauOverflow(db);
-    if (lastTau > 2.0)
-    {
-        std::printf("初始布局全部堆叠(tau=%.4f)，先做一次随机散布作为全局布局起点\n", lastTau);
-        ScatterInit(db);
-        ClampModulesToChip(db);
-        UpdateBinDensities(db);
-        lastTau = ComputeTauOverflow(db);
-        std::printf("随机散布后 tau = %.4f\n", lastTau);
-    }
 
     const double initHPWL = ComputeHPWL(db);
+    stats.initialHPWL = initHPWL;
     initHPWLRef = initHPWL;
     double lambda = PenaltyFactorInit(db);
     const double lambdaInit = lambda;
@@ -1077,14 +1134,24 @@ void GlobalPlacement::run(PlaceData* db)
     std::printf("密度网格: %d x %d（bin 尺寸 %.2f x %.2f）\n", binM, binM, binWidth, binHeight);
     std::printf("初始 HPWL = %.3f，初始 tau = %.4f，lambda = %.6e\n", initHPWL, tau, lambda);
 
-    iterLogFile.open("placement_iter.log");
-    if (iterLogFile.is_open())
-        iterLogFile << "iter,hpwl,tau,lambda\n";
+    std::vector<POS_2D> bestCenters(nodesAndFillers.size());
+    auto saveCenters = [&]() {
+        for (std::size_t i = 0; i < nodesAndFillers.size(); ++i)
+            bestCenters[i] = nodesAndFillers[i]->center;
+    };
+    saveCenters();
+    double bestTau = tau;
+    double bestHPWL = initHPWL;
+    const double hpwlScale = std::max(initHPWL, 1.0);
+    double bestScore = bestHPWL / hpwlScale + 10.0 * bestTau;
+    bool foundFeasible = bestTau < targetTau;
+    int bestIteration = -1;
 
     const double chipShortSide = std::min(static_cast<double>(chipUR.x) - static_cast<double>(chipLL.x),
                                           static_cast<double>(chipUR.y) - static_cast<double>(chipLL.y));
     int iter = 0;
     int doneIters = 0;
+    int feasibleStreak = 0;
 
     for (; iter < maxIter; ++iter)
     {
@@ -1097,7 +1164,7 @@ void GlobalPlacement::run(PlaceData* db)
                                           0.5 * std::min(binWidth, binHeight));
 
         GetTotalGradient(db, lambda);
-        NesterovUpdate(db, betaMomentum, stepLimit);
+        MomentumUpdate(db, betaMomentum, stepLimit);
         ClampModulesToChip(db);
 
         const double currHPWL = ComputeHPWL(db);
@@ -1110,14 +1177,31 @@ void GlobalPlacement::run(PlaceData* db)
         lambda = UpdateLambda(lambda, currHPWL - hpwlHistory.front());
         lambda = clampValue(lambda, lambdaInit * 1e-3, lambdaInit * 1e6);
 
+        const bool feasible = tau < targetTau;
+        const double score = currHPWL / hpwlScale + 10.0 * tau;
+        const bool better = (feasible && !foundFeasible)
+                         || (feasible && foundFeasible && currHPWL < bestHPWL)
+                         || (!feasible && !foundFeasible && score < bestScore);
+        if (better)
+        {
+            saveCenters();
+            bestTau = tau;
+            bestHPWL = currHPWL;
+            bestScore = score;
+            bestIteration = iter;
+        }
+        foundFeasible = foundFeasible || feasible;
+        feasibleStreak = feasible ? (feasibleStreak + 1) : 0;
+
         std::printf("iter %4d | HPWL %.1f | tau %.4f | lambda %.6e\n", iter, currHPWL, tau, lambda);
         if (iterLogFile.is_open())
             iterLogFile << iter << "," << currHPWL << "," << tau << "," << lambda << "\n";
         doneIters = iter + 1;
 
-        if (tau < targetTau)
+        if (iter + 1 >= minIter && feasibleStreak >= 5)
         {
-            std::printf(">>> 密度溢出率 tau = %.4f 低于目标 %.4f，迭代终止\n", tau, targetTau);
+            std::printf(">>> 密度溢出率连续 %d 轮低于目标 %.4f，迭代终止\n",
+                        feasibleStreak, targetTau);
             break;
         }
     }
@@ -1125,13 +1209,33 @@ void GlobalPlacement::run(PlaceData* db)
     if (iterLogFile.is_open())
         iterLogFile.close();
 
+    // 最大迭代数结束时可能已经离开最佳点，恢复综合线长与密度最好的结果。
+    for (std::size_t i = 0; i < nodesAndFillers.size(); ++i)
+        nodesAndFillers[i]->center = bestCenters[i];
+    binDensityDirty = true;
+    ClampModulesToChip(db);
+    UpdateBinDensities(db);
+    bestTau = ComputeTauOverflow(db);
+
     const double finalHPWL = ComputeHPWL(db);
-    std::printf("==== 全局布局完成：迭代 %d 次，HPWL %.3f -> %.3f（变化 %+.2f%%），tau = %.4f ====\n",
-                doneIters, initHPWL, finalHPWL,
-                (initHPWL > 0.0) ? (100.0 * (finalHPWL - initHPWL) / initHPWL) : 0.0, tau);
+    stats.converged = bestTau < targetTau;
+    stats.iterations = doneIters;
+    stats.bestIteration = bestIteration;
+    stats.finalHPWL = finalHPWL;
+    stats.bestTau = bestTau;
+
+    if (!stats.converged)
+        std::printf("注意：达到最大迭代次数，但 tau = %.4f 尚未达到目标 %.4f\n",
+                    bestTau, targetTau);
+    std::printf("==== 全局布局完成：迭代 %d 次，采用第 %d 轮结果，HPWL %.3f -> %.3f"
+                "（变化 %+.2f%%），tau = %.4f，%s ====\n",
+                doneIters, bestIteration, initHPWL, finalHPWL,
+                (initHPWL > 0.0) ? (100.0 * (finalHPWL - initHPWL) / initHPWL) : 0.0,
+                bestTau, stats.converged ? "已收敛" : "未收敛");
 
     for (Module* filler : fillerNodes)
         delete filler;
     fillerNodes.clear();
     nodesAndFillers.clear();
+    return stats;
 }

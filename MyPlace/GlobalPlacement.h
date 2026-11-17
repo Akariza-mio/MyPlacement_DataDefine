@@ -7,11 +7,11 @@
 //   · D(x,y)    为密度惩罚项（静电类比，见 ComputeDensityGradient）
 //   · λ         为密度权重（初始由梯度量级比给出，迭代中按公式(37)自适应）
 //
-// 求解：Nesterov 加速梯度法（动量 + 步长按"单步位移上限"归一化）。
+// 求解：带动量的梯度下降（步长按"单步位移上限"归一化）。
 //
 // 计算流程：
 //   SetChipBoundary → BinInit → FillerInit → GradientVectorInitialization
-//   → PenaltyFactorInit → { GetTotalGradient → NesterovUpdate → UpdateLambda
+//   → PenaltyFactorInit → { GetTotalGradient → MomentumUpdate → UpdateLambda
 //                           → ComputeTauOverflow } 循环 → 清理 filler
 // ============================================================================
 
@@ -19,7 +19,18 @@
 
 #include <cstdint>
 #include <fstream>
+#include <string>
 #include <vector>
+
+struct GlobalPlacementStats
+{
+    bool converged{ false };
+    int iterations{ 0 };
+    int bestIteration{ -1 };
+    double initialHPWL{ 0.0 };
+    double finalHPWL{ 0.0 };
+    double bestTau{ 0.0 };
+};
 
 // BinGrid：把布局区域均匀划分成 m×m 个密度网格，其中一个格子的数据。
 // 各 *Density 字段保存的是"面积贡献"（长度单位²），不是 0~1 的占用比例；
@@ -47,7 +58,8 @@ class GlobalPlacement
 public:
     // 对 db 中已解析好的布局数据做全局布局，结果直接写回 Module::center。
     // 固定单元（terminal 或 .pl 中标记 /FIXED 的单元）不会被移动。
-    void run(PlaceData* db);
+    GlobalPlacementStats run(PlaceData* db, const std::string& iterationLogPath,
+                             unsigned int seed = 42);
 
 private:
     // ------------------------------------------------------------------
@@ -71,10 +83,11 @@ private:
     // ------------------------------------------------------------------
     // 位置更新与参数自适应（文档步骤 2-2 / 2-3）
     // ------------------------------------------------------------------
-    void NesterovUpdate(PlaceData* db, double beta, double stepLimit);
+    void MomentumUpdate(PlaceData* db, double beta, double stepLimit);
     double UpdateLambda(double oldLambda, double deltaHPWL);
     void ClampModulesToChip(PlaceData* db);        // 把单元投影回芯片内部
     void ScatterInit(PlaceData* db);               // 退化初始解（全部堆在一点）的随机散布兜底
+    bool NeedsScatterInit(const PlaceData* db) const;
 
     // ------------------------------------------------------------------
     // 评估（文档 3.3 节与停止判定）
@@ -112,7 +125,7 @@ private:
     std::vector<double> gradWireX, gradWireY;
     std::vector<double> gradDenX, gradDenY;
     std::vector<double> gradTotalX, gradTotalY;
-    std::vector<double> vx, vy;            // Nesterov 动量
+    std::vector<double> vx, vy;            // 梯度动量
     std::vector<double> momentumSample;    // 估计动量中位数时的抽样缓存
 
     // DCT 相关查表与频域/空域缓存（尺寸均为 binM*binM，按 [i*binM+j] 存放）
@@ -141,10 +154,12 @@ private:
     double initHPWLRef{ 0.0 };             // 初始 HPWL（lambda 更新时用来缩放 ΔHPWL_REF）
     std::vector<double> hpwlHistory;       // 最近若干次迭代的 HPWL，用于平滑 ΔHPWL
     bool binDensityDirty{ true };          // 单元位置未变时复用上一次的 bin 密度统计
+    unsigned int randomSeed{ 42 };
 
     // 超参数
     double betaMomentum{ 0.90 };           // 动量系数 β
     double targetTau{ 0.10 };              // 目标密度溢出率 τ_min
+    int minIter{ 30 };                     // 避免均匀随机起点造成“一轮虚假收敛”
     int maxIter{ 500 };                    // 最大迭代次数
     double targetBinDensity{ 0.75 };       // 目标密度 ρ_t
     double gammaBinScale{ 8.0 };           // 公式(6) 中的 8w_b
@@ -152,5 +167,5 @@ private:
     bool useLengthScaling{ false };        // 文档 1-4-2-1 的 LengthScale（默认关闭，见 .cpp）
     double boundK{ 1200.0 };               // 软边界惩罚强度（安全保护）
 
-    std::ofstream iterLogFile;             // 迭代日志 placement_iter.log
+    std::ofstream iterLogFile;             // 迭代日志，由主程序指定到输出目录
 };
